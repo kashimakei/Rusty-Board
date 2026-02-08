@@ -20,8 +20,9 @@ A lightweight 2D physics simulation of a ball bouncing on a cantilevered soft-bo
 To get started immediately on Linux or macOS, run the following command in your terminal:
 ```bash
 ./setup.sh
+source $HOME/.cargo/env
 ```
-This script will:
+> **Note:** Sourcing the environment is only required once in your current terminal session after installing Rust.
 1. Install necessary system dependencies (X11, OpenGL headers, etc.).
 2. Install the Rust toolchain if it's not already present.
 3. Build the project.
