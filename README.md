@@ -15,16 +15,24 @@ A lightweight 2D physics simulation of a ball bouncing on a cantilevered soft-bo
 - **[Space]**: Respawn the ball at the top.
 - **[R]**: Reset the simulation (plank and ball).
 
-## Getting Started
+## Quick Start (One-Time Setup)
 
-### Prerequisites
-- [Rust](https://rustup.rs/) installed.
-- System dependencies for macroquad (Linux):
-  ```bash
-  sudo apt install pkg-config libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev
-  ```
+To get started immediately on Linux or macOS, run the following command in your terminal:
+```bash
+./setup.sh
+```
+This script will:
+1. Install necessary system dependencies (X11, OpenGL headers, etc.).
+2. Install the Rust toolchain if it's not already present.
+3. Build the project.
 
-### Running the App
+### Windows Setup
+1. Install [Rust](https://rustup.rs/).
+2. No extra dependencies are usually required for Windows (macroquad handles it via Miniquad).
+3. Run `cargo run` in your terminal.
+
+## Running the App
+Once set up, simply run:
 ```bash
 cargo run
 ```
