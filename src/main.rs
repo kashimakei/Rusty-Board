@@ -329,7 +329,7 @@ async fn main() {
     let mut stiffness_val = PLANK_STIFFNESS;
     let mut spawn_x_val = SPAWN_X;
     let mut ball_size_val = 15.0;
-    let mut wobble_threshold_val = 1500.0;
+    let mut wobble_threshold_val = 800.0;
     
     let dt = 1.0 / 60.0;
     let sub_dt = dt / SUB_STEPS as f32;
