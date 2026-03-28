@@ -1,18 +1,19 @@
 use macroquad::prelude::*;
 use macroquad::ui::{hash, root_ui, widgets};
+use macroquad::audio::{load_sound, play_sound_once, Sound};
 use std::f32::consts::PI;
 
 // --- TUNABLE PARAMETERS ---
 const GRAVITY: f32 = 800.0;
 const FRICTION: f32 = 0.999;
-const BALL_DENSITY: f32 = 0.01;      // mass = PI * r^2 * density
-const BALL_FLUBBER: f32 = 0.75;
+const BALL_DENSITY: f32 = 0.05;     // mass = PI * r^2 * density
+const BALL_FLUBBER: f32 = 0.85;
 const PLANK_STIFFNESS: f32 = 0.95;
 const PLANK_DAMPING: f32 = 0.999;
 const SUB_STEPS: usize = 12;
 
 // --- DYNAMIC PARAMETERS ---
-const DEFAULT_PLANK_LENGTH: f32 = 400.0;
+const DEFAULT_PLANK_LENGTH: f32 = 700.0;
 const PLANK_SEGMENT_DENSITY: f32 = 30.0; // pixels per segment
 const SPAWN_X: f32 = 350.0;
 const SPAWN_Y: f32 = -50.0;
@@ -209,7 +210,7 @@ impl Ball {
 
 // --- COLLISION LOGIC ---
 
-fn resolve_ball_plank_collision(ball: &mut Ball, plank: &mut SoftBody) {
+fn resolve_ball_plank_collision(ball: &mut Ball, plank: &mut SoftBody, boing_sound: Option<&Sound>, boingee_sound: Option<&Sound>) {
     for c in &plank.constraints {
         let node_a_pos = plank.nodes[c.node_a].pos;
         let node_b_pos = plank.nodes[c.node_b].pos;
@@ -228,6 +229,26 @@ fn resolve_ball_plank_collision(ball: &mut Ball, plank: &mut SoftBody) {
             let normal = dist_vec.normalize();
             let overlap = ball.radius - dist;
 
+            // Calculate true impact velocity before any position correction
+            let v_a = plank.nodes[c.node_a].pos.sub(plank.nodes[c.node_a].old_pos);
+            let v_b = plank.nodes[c.node_b].pos.sub(plank.nodes[c.node_b].old_pos);
+            let plank_v = v_a.mul(1.0 - t_clamped).add(v_b.mul(t_clamped));
+            
+            let pre_vel = ball.pos.sub(ball.old_pos);
+            let rel_vel = pre_vel.sub(plank_v);
+            let impact_speed = -rel_vel.dot(normal);
+            
+            // Trigger boing if approach speed is strong enough
+            if impact_speed > 1.25{
+                if let Some(snd) = boingee_sound {
+                    play_sound_once(snd);
+                }
+            }
+            else if impact_speed > 0.9 {
+                if let Some(snd) = boing_sound {
+                    play_sound_once(snd);
+                }
+            }
             ball.pos = ball.pos.add(normal.mul(overlap));
             
             let vel = ball.pos.sub(ball.old_pos);
@@ -247,7 +268,7 @@ fn resolve_ball_plank_collision(ball: &mut Ball, plank: &mut SoftBody) {
                     plank.nodes[c.node_b].pos = plank.nodes[c.node_b].pos.sub(normal.mul(node_impact * t_clamped));
                 }
             }
-        }
+        }   
     }
 }
 
@@ -290,6 +311,12 @@ fn resolve_ball_ball_collision(b1: &mut Ball, b2: &mut Ball) {
 
 #[macroquad::main("Diving Board Sim (Final)")]
 async fn main() {
+    request_new_screen_size(1280.0, 720.0);
+    
+    let pop_sound = load_sound("src/assets/pop.wav").await.unwrap_or_else(|_| panic!("Failed to load pop.wav"));
+    let boing_sound = load_sound("src/assets/Boing.wav").await.unwrap_or_else(|_| panic!("Failed to load Boing.wav"));
+    let wobble_sound = load_sound("src/assets/wobble.wav").await.unwrap_or_else(|_| panic!("Failed to load wobble.wav"));
+    let boingee_sound = load_sound("src/assets/Boingee.wav").await.unwrap_or_else(|_| panic!("Failed to load Boingee.wav"));
     let mut plank_length = DEFAULT_PLANK_LENGTH;
     let mut segments = (plank_length / PLANK_SEGMENT_DENSITY) as usize;
     let mut plank = SoftBody::new_truss_plank(Vec2::new(100.0, 300.0), plank_length, 25.0, segments, PLANK_STIFFNESS);
@@ -302,30 +329,34 @@ async fn main() {
     let mut stiffness_val = PLANK_STIFFNESS;
     let mut spawn_x_val = SPAWN_X;
     let mut ball_size_val = 15.0;
+    let mut wobble_threshold_val = 1500.0;
     
     let dt = 1.0 / 60.0;
     let sub_dt = dt / SUB_STEPS as f32;
 
     let mut spawn_timer = 0.0;
-    let mut balls_per_second = 1.0;
+    let mut balls_per_second = 1.5;
     let mut random_size = true;
+    let mut wobble_playing = false;
+    let mut wobble_timer = 0.0;
+    let mut next_spawn_target = 1.0;
 
     loop {
         clear_background(Color::new(0.05, 0.05, 0.1, 1.0));
 
         // --- UI ---
-        widgets::Window::new(hash!(), vec2(20.0, 60.0), vec2(320.0, 450.0))
+        widgets::Window::new(hash!(), vec2(screen_width(), 100.0), vec2(400.0, 450.0))
             .label("Simulation Controls")
             .ui(&mut *root_ui(), |ui| {
-                ui.slider(hash!(), "Balls/Sec", 0.2..2.5, &mut balls_per_second);
+                ui.slider(hash!(), "Balls/Sec", 0.2..3.5, &mut balls_per_second);
                 
-                let board_start = 100.0;
+                let board_start = 200.0;
                 let board_end = board_start + plank_length;
                 ui.slider(hash!(), "Spawn X", board_start..board_end, &mut spawn_x_val);
                 spawn_x_val = spawn_x_val.clamp(board_start, board_end);
                 
                 let old_len = plank_length;
-                ui.slider(hash!(), "Board Length", 100.0..700.0, &mut plank_length);
+                ui.slider(hash!(), "Board Length", 100.0..1500.0, &mut plank_length);
                 if (plank_length - old_len).abs() > 1.0 {
                     segments = (plank_length / PLANK_SEGMENT_DENSITY).max(2.0) as usize;
                     plank = SoftBody::new_truss_plank(Vec2::new(100.0, 300.0), plank_length, 25.0, segments, stiffness_val);
@@ -344,8 +375,9 @@ async fn main() {
                     }
                 }
 
-                ui.slider(hash!(), "Ball Size", 5.0..40.0, &mut ball_size_val);
+                ui.slider(hash!(), "Ball Size", 5.0..50.0, &mut ball_size_val);
                 ui.checkbox(hash!(), "Random Size", &mut random_size);
+                ui.slider(hash!(), "Wobble Threshold", 100.0..5000.0, &mut wobble_threshold_val);
                 
                 if ui.button(None, "Clear Balls") {
                     balls.clear();
@@ -365,11 +397,16 @@ async fn main() {
             });
 
         // --- SPAWN LOGIC ---
-        spawn_timer += get_frame_time();
-        let interval = 1.0 / balls_per_second;
-        while spawn_timer >= interval {
-            spawn_timer -= interval;
+        spawn_timer += get_frame_time() * balls_per_second;
+        while spawn_timer >= next_spawn_target {
+            spawn_timer -= next_spawn_target;
+            
+            // Exponential distribution for realistic "popcorn" burst spacing (mean = 1.0)
+            let u = rand::gen_range(0.01f32, 1.0f32);
+            next_spawn_target = -u.ln();
+
             let radius = if random_size { rand::gen_range(10.0, 30.0) } else { ball_size_val };
+            play_sound_once(&pop_sound);
             balls.push(Ball::new(
                 Vec2::new(spawn_x_val + rand::gen_range(-20.0, 20.0), SPAWN_Y),
                 radius,
@@ -379,6 +416,7 @@ async fn main() {
         }
 
         if is_key_pressed(KeyCode::Space) {
+             play_sound_once(&pop_sound);
              balls.push(Ball::new(Vec2::new(spawn_x_val, 100.0), ball_size_val, density_val, flubber_val));
         }
         if is_key_pressed(KeyCode::R) {
@@ -402,7 +440,7 @@ async fn main() {
                 // Ball-Plank
                 balls[i].acc = balls[i].acc.add(gravity_vec);
                 balls[i].update(sub_dt, 1.0 - gloop_val);
-                resolve_ball_plank_collision(&mut balls[i], &mut plank);
+                resolve_ball_plank_collision(&mut balls[i], &mut plank, Some(&boing_sound), Some(&boingee_sound));
             }
 
             // Ball-Ball
@@ -422,6 +460,67 @@ async fn main() {
         }
 
         balls.retain(|b| b.pos.y < screen_height() + 100.0 && b.pos.x > -100.0 && b.pos.x < screen_width() + 100.0);
+
+        // --- WOBBLE LOGIC ---
+        let top_nodes_len = plank.nodes.len() / 2;
+        let mut mean_radius = 100000.0;
+        let mut sign_flips = 0;
+        
+        if top_nodes_len >= 3 {
+            let mut total_r = 0.0;
+            let mut last_sign = 0;
+            
+            for i in 1..(top_nodes_len - 1) {
+                let pos_a = plank.nodes[i-1].pos;
+                let pos_b = plank.nodes[i].pos;
+                let pos_c = plank.nodes[i+1].pos;
+
+                let ab = pos_b.sub(pos_a);
+                let bc = pos_c.sub(pos_b);
+                
+                // 2D cross product Z component to find bend direction
+                let cross_z = ab.x * bc.y - ab.y * bc.x;
+                
+                // Deadzone to ignore noisy micro-jitters (straight lines)
+                let current_sign = if cross_z > 5.0 { 1 } else if cross_z < -5.0 { -1 } else { 0 };
+                
+                if current_sign != 0 {
+                    if last_sign != 0 && current_sign != last_sign {
+                        sign_flips += 1;
+                    }
+                    last_sign = current_sign;
+                }
+
+                let a = ab.length();
+                let b = bc.length();
+                let c = pos_a.sub(pos_c).length();
+
+                let s = (a + b + c) / 2.0;
+                let area_sq = s * (s - a) * (s - b) * (s - c);
+                let r = if area_sq > 0.1 {
+                    (a * b * c) / (4.0 * area_sq.sqrt())
+                } else {
+                    100000.0
+                };
+                total_r += r;
+            }
+            mean_radius = total_r / (top_nodes_len - 2) as f32;
+        }
+
+        if mean_radius < wobble_threshold_val && sign_flips >= 1 {
+            if !wobble_playing {
+                play_sound_once(&wobble_sound);
+                wobble_timer = 2.332; // Duration of wobble.wav
+                wobble_playing = true;
+            }
+        }
+
+        if wobble_playing {
+            wobble_timer -= get_frame_time();
+            if wobble_timer <= 0.0 {
+                wobble_playing = false;
+            }
+        }
 
         // --- DRAW ---
         for c in &plank.constraints {
