@@ -1,7 +1,6 @@
 use macroquad::prelude::*;
 use macroquad::ui::{hash, root_ui, widgets};
-use macroquad::audio::{load_sound, play_sound_once, Sound};
-use std::f32::consts::PI;
+use macroquad::audio::{load_sound, play_sound_once};
 
 // --- TUNABLE PARAMETERS ---
 const GRAVITY: f32 = 800.0;
@@ -18,305 +17,13 @@ const PLANK_SEGMENT_DENSITY: f32 = 30.0; // pixels per segment
 const SPAWN_X: f32 = 350.0;
 const SPAWN_Y: f32 = -50.0;
 
-// --- MATH UTILITIES ---
+mod math;
+mod branch;
+mod ball;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Vec2 {
-    x: f32,
-    y: f32,
-}
-
-impl Vec2 {
-    fn new(x: f32, y: f32) -> Self {
-        Self { x, y }
-    }
-
-    fn zero() -> Self {
-        Self::new(0.0, 0.0)
-    }
-
-    fn add(self, other: Self) -> Self {
-        Self::new(self.x + other.x, self.y + other.y)
-    }
-
-    fn sub(self, other: Self) -> Self {
-        Self::new(self.x - other.x, self.y - other.y)
-    }
-
-    fn mul(self, scalar: f32) -> Self {
-        Self::new(self.x * scalar, self.y * scalar)
-    }
-
-    fn dot(self, other: Self) -> f32 {
-        self.x * other.x + self.y * other.y
-    }
-
-    fn length_sq(self) -> f32 {
-        self.dot(self)
-    }
-
-    fn length(self) -> f32 {
-        self.length_sq().sqrt()
-    }
-
-    fn normalize(self) -> Self {
-        let len = self.length();
-        if len > 0.0 {
-            self.mul(1.0 / len)
-        } else {
-            Self::zero()
-        }
-    }
-}
-
-// --- PHYSICS ENTITIES ---
-
-#[derive(Clone, Copy, Debug)]
-struct Node {
-    pos: Vec2,
-    old_pos: Vec2,
-    acc: Vec2,
-    radius: f32,
-    pinned: bool,
-}
-
-impl Node {
-    fn new(pos: Vec2, radius: f32, pinned: bool) -> Self {
-        Self {
-            pos,
-            old_pos: pos,
-            acc: Vec2::zero(),
-            radius,
-            pinned,
-        }
-    }
-
-    fn update(&mut self, dt: f32, friction: f32) {
-        if self.pinned { return; }
-
-        let vel = self.pos.sub(self.old_pos).mul(friction);
-        self.old_pos = self.pos;
-        self.pos = self.pos.add(vel).add(self.acc.mul(dt * dt));
-        self.acc = Vec2::zero();
-    }
-}
-
-struct Constraint {
-    node_a: usize,
-    node_b: usize,
-    target_length: f32,
-    stiffness: f32,
-}
-
-impl Constraint {
-    fn new(node_a: usize, node_b: usize, target_length: f32, stiffness: f32) -> Self {
-        Self { node_a, node_b, target_length, stiffness }
-    }
-}
-
-struct SoftBody {
-    nodes: Vec<Node>,
-    constraints: Vec<Constraint>,
-}
-
-impl SoftBody {
-    fn new_tree_branch(start: Vec2, length: f32, base_depth: f32, segments: usize, stiffness: f32) -> Self {
-        let mut nodes = Vec::new();
-        let mut constraints = Vec::new();
-        let segment_len = length / segments as f32;
-
-        for i in 0..=segments {
-            let t = i as f32 / segments as f32;
-            let bend = (t * PI * 1.5).sin() * 30.0 + (t * PI * 4.0).sin() * 10.0 + (t * t * 40.0);
-            
-            let pos_top = Vec2::new(start.x + i as f32 * segment_len, start.y + bend);
-            let pinned = i == 0 || i == 1; 
-            nodes.push(Node::new(pos_top, 3.0, pinned));
-        }
-
-        for i in 0..=segments {
-            let t = i as f32 / segments as f32;
-            let current_depth = base_depth * (1.0 - 0.75 * t).max(0.1);
-            let bend = (t * PI * 1.5).sin() * 30.0 + (t * PI * 4.0).sin() * 10.0 + (t * t * 40.0);
-            
-            let pos_bottom = Vec2::new(start.x + i as f32 * segment_len, start.y + bend + current_depth);
-            let pinned = i == 0 || i == 1; 
-            nodes.push(Node::new(pos_bottom, 3.0, pinned));
-        }
-
-        let bottom_offset = segments + 1;
-
-        let get_dist = |nodes: &Vec<Node>, a: usize, b: usize| -> f32 {
-            nodes[a].pos.sub(nodes[b].pos).length()
-        };
-
-        for i in 0..segments {
-            let t1 = i;
-            let t2 = i + 1;
-            let b1 = i + bottom_offset;
-            let b2 = i + 1 + bottom_offset;
-
-            constraints.push(Constraint::new(t1, t2, get_dist(&nodes, t1, t2), stiffness));
-            constraints.push(Constraint::new(b1, b2, get_dist(&nodes, b1, b2), stiffness));
-            constraints.push(Constraint::new(t1, b1, get_dist(&nodes, t1, b1), stiffness));
-            
-            constraints.push(Constraint::new(t1, b2, get_dist(&nodes, t1, b2), stiffness));
-            constraints.push(Constraint::new(b1, t2, get_dist(&nodes, b1, t2), stiffness));
-        }
-        constraints.push(Constraint::new(segments, segments + bottom_offset, get_dist(&nodes, segments, segments + bottom_offset), stiffness));
-
-        Self { nodes, constraints }
-    }
-
-    fn update_constraints(&mut self, iterations: usize) {
-        for _ in 0..iterations {
-            for c in &self.constraints {
-                let delta = self.nodes[c.node_b].pos.sub(self.nodes[c.node_a].pos);
-                let current_len = delta.length();
-                if current_len == 0.0 { continue; }
-                
-                let diff = (current_len - c.target_length) / current_len;
-                let offset = delta.mul(diff * 0.5 * c.stiffness);
-
-                if !self.nodes[c.node_a].pinned {
-                    self.nodes[c.node_a].pos = self.nodes[c.node_a].pos.add(offset);
-                }
-                if !self.nodes[c.node_b].pinned {
-                    self.nodes[c.node_b].pos = self.nodes[c.node_b].pos.sub(offset);
-                }
-            }
-        }
-    }
-}
-
-struct Ball {
-    pos: Vec2,
-    old_pos: Vec2,
-    acc: Vec2,
-    radius: f32,
-    mass: f32,
-    restitution: f32,
-}
-
-impl Ball {
-    fn new(pos: Vec2, radius: f32, density: f32, restitution: f32) -> Self {
-        let mass = PI * radius * radius * density;
-        Self {
-            pos,
-            old_pos: pos,
-            acc: Vec2::zero(),
-            radius,
-            mass,
-            restitution,
-        }
-    }
-
-    fn update(&mut self, dt: f32, friction: f32) {
-        let vel = self.pos.sub(self.old_pos).mul(friction);
-        self.old_pos = self.pos;
-        self.pos = self.pos.add(vel).add(self.acc.mul(dt * dt));
-        self.acc = Vec2::zero();
-    }
-}
-
-// --- COLLISION LOGIC ---
-
-fn resolve_ball_plank_collision(ball: &mut Ball, plank: &mut SoftBody, boing_sound: Option<&Sound>, boingee_sound: Option<&Sound>) {
-    for c in &plank.constraints {
-        let node_a_pos = plank.nodes[c.node_a].pos;
-        let node_b_pos = plank.nodes[c.node_b].pos;
-
-        let ab = node_b_pos.sub(node_a_pos);
-        let ap = ball.pos.sub(node_a_pos);
-
-        let t = ap.dot(ab) / ab.length_sq();
-        let t_clamped = t.clamp(0.0, 1.0);
-
-        let nearest = node_a_pos.add(ab.mul(t_clamped));
-        let dist_vec = ball.pos.sub(nearest);
-        let dist = dist_vec.length();
-
-        if dist < ball.radius {
-            let normal = dist_vec.normalize();
-            let overlap = ball.radius - dist;
-
-            // Calculate true impact velocity before any position correction
-            let v_a = plank.nodes[c.node_a].pos.sub(plank.nodes[c.node_a].old_pos);
-            let v_b = plank.nodes[c.node_b].pos.sub(plank.nodes[c.node_b].old_pos);
-            let plank_v = v_a.mul(1.0 - t_clamped).add(v_b.mul(t_clamped));
-            
-            let pre_vel = ball.pos.sub(ball.old_pos);
-            let rel_vel = pre_vel.sub(plank_v);
-            let impact_speed = -rel_vel.dot(normal);
-            
-            // Trigger boing if approach speed is strong enough
-            if impact_speed > 1.25{
-                if let Some(snd) = boingee_sound {
-                    play_sound_once(snd);
-                }
-            }
-            else if impact_speed > 0.9 {
-                if let Some(snd) = boing_sound {
-                    play_sound_once(snd);
-                }
-            }
-            ball.pos = ball.pos.add(normal.mul(overlap));
-            
-            let vel = ball.pos.sub(ball.old_pos);
-            let vel_dot_n = vel.dot(normal);
-            
-            if vel_dot_n < 0.0 {
-                let impulse_mag = vel_dot_n * (1.0 + ball.restitution);
-                let impulse = normal.mul(impulse_mag);
-                ball.old_pos = ball.pos.sub(vel.sub(impulse));
-                
-                // Reaction on plank nodes - scale by ball mass
-                let node_impact = overlap * 0.5 * (ball.mass / 10.0).clamp(0.5, 2.0);
-                if !plank.nodes[c.node_a].pinned {
-                    plank.nodes[c.node_a].pos = plank.nodes[c.node_a].pos.sub(normal.mul(node_impact * (1.0 - t_clamped)));
-                }
-                if !plank.nodes[c.node_b].pinned {
-                    plank.nodes[c.node_b].pos = plank.nodes[c.node_b].pos.sub(normal.mul(node_impact * t_clamped));
-                }
-            }
-        }   
-    }
-}
-
-fn resolve_ball_ball_collision(b1: &mut Ball, b2: &mut Ball) {
-    let dist_vec = b1.pos.sub(b2.pos);
-    let dist_sq = dist_vec.length_sq();
-    let min_dist = b1.radius + b2.radius;
-
-    if dist_sq < min_dist * min_dist {
-        let dist = dist_sq.sqrt();
-        let normal = dist_vec.mul(1.0 / dist);
-        let overlap = min_dist - dist;
-
-        // Static separation based on mass
-        let m_total = b1.mass + b2.mass;
-        let w1 = b2.mass / m_total;
-        let w2 = b1.mass / m_total;
-
-        b1.pos = b1.pos.add(normal.mul(overlap * w1));
-        b2.pos = b2.pos.sub(normal.mul(overlap * w2));
-
-        // Dynamic impulse (Elastic momentum exchange)
-        let v1 = b1.pos.sub(b1.old_pos);
-        let v2 = b2.pos.sub(b2.old_pos);
-        let relative_vel = v1.sub(v2);
-        let vel_dot_n = relative_vel.dot(normal);
-
-        if vel_dot_n < 0.0 {
-            let restitution = (b1.restitution + b2.restitution) * 0.5;
-            let impulse_mag = -(1.0 + restitution) * vel_dot_n / (1.0 / b1.mass + 1.0 / b2.mass);
-            let impulse = normal.mul(impulse_mag);
-
-            b1.old_pos = b1.pos.sub(v1.add(impulse.mul(1.0 / b1.mass)));
-            b2.old_pos = b2.pos.sub(v2.sub(impulse.mul(1.0 / b2.mass)));
-        }
-    }
-}
+use math::Vec2;
+use branch::Branch as SoftBody;
+use ball::{Ball, resolve_ball_plank_collision, resolve_ball_ball_collision};
 
 // --- MAIN LOOP ---
 
@@ -330,7 +37,7 @@ async fn main() {
     let boingee_sound = load_sound("src/assets/Boingee.wav").await.unwrap_or_else(|_| panic!("Failed to load Boingee.wav"));
     let mut plank_length = DEFAULT_PLANK_LENGTH;
     let mut segments = (plank_length / PLANK_SEGMENT_DENSITY) as usize;
-    let mut plank = SoftBody::new_tree_branch(Vec2::new(100.0, 300.0), plank_length, 45.0, segments, PLANK_STIFFNESS);
+    let mut plank = SoftBody::new_tree_branch(Vec2::new(100.0, 300.0), plank_length, 45.0, segments, PLANK_STIFFNESS, 1.0);
     let mut balls: Vec<Ball> = Vec::new();
     
     let mut gravity_val = GRAVITY;
@@ -370,7 +77,7 @@ async fn main() {
                 ui.slider(hash!(), "Board Length", 100.0..1500.0, &mut plank_length);
                 if (plank_length - old_len).abs() > 1.0 {
                     segments = (plank_length / PLANK_SEGMENT_DENSITY).max(2.0) as usize;
-                    plank = SoftBody::new_tree_branch(Vec2::new(100.0, 300.0), plank_length, 45.0, segments, stiffness_val);
+                    plank = SoftBody::new_tree_branch(Vec2::new(100.0, 300.0), plank_length, 45.0, segments, stiffness_val, 1.0);
                 }
 
                 ui.slider(hash!(), "Gravity", 0.0..2000.0, &mut gravity_val);
@@ -397,7 +104,7 @@ async fn main() {
                     plank_length = DEFAULT_PLANK_LENGTH;
                     stiffness_val = PLANK_STIFFNESS;
                     segments = (plank_length / PLANK_SEGMENT_DENSITY) as usize;
-                    plank = SoftBody::new_tree_branch(Vec2::new(board_start, 300.0), plank_length, 45.0, segments, stiffness_val);
+                    plank = SoftBody::new_tree_branch(Vec2::new(board_start, 300.0), plank_length, 45.0, segments, stiffness_val, 1.0);
                     balls_per_second = 1.0;
                     spawn_x_val = SPAWN_X;
                     ball_size_val = 15.0;
@@ -432,16 +139,17 @@ async fn main() {
         }
         if is_key_pressed(KeyCode::R) {
             segments = (plank_length / PLANK_SEGMENT_DENSITY) as usize;
-            plank = SoftBody::new_tree_branch(Vec2::new(100.0, 300.0), plank_length, 45.0, segments, stiffness_val);
+            plank = SoftBody::new_tree_branch(Vec2::new(100.0, 300.0), plank_length, 45.0, segments, stiffness_val, 1.0);
             balls.clear();
         }
 
         // --- UPDATE ---
         let gravity_vec = Vec2::new(0.0, gravity_val);
+        let mut ball_impacts: Vec<Option<f32>> = vec![None; balls.len()];
         for _ in 0..SUB_STEPS {
             // Update Plank
             for node in &mut plank.nodes {
-                node.acc = node.acc.add(gravity_vec);
+                node.acc = node.acc.add_val(gravity_vec);
                 node.update(sub_dt, PLANK_DAMPING);
             }
             plank.update_constraints(4);
@@ -449,9 +157,13 @@ async fn main() {
             // Update Balls
             for i in 0..balls.len() {
                 // Ball-Plank
-                balls[i].acc = balls[i].acc.add(gravity_vec);
+                balls[i].acc = balls[i].acc.add_val(gravity_vec);
                 balls[i].update(sub_dt, 1.0 - gloop_val);
-                resolve_ball_plank_collision(&mut balls[i], &mut plank, Some(&boing_sound), Some(&boingee_sound));
+                let impact = resolve_ball_plank_collision(&mut balls[i], &mut plank);
+                if let Some(speed) = impact {
+                    let current = ball_impacts[i].unwrap_or(0.0);
+                    ball_impacts[i] = Some(current.max(speed));
+                }
             }
 
             // Ball-Ball
@@ -470,6 +182,24 @@ async fn main() {
             }
         }
 
+        // --- BOING TRIGGER (once per frame, on first-contact transition, with cooldown) ---
+        const BOING_COOLDOWN_SECS: f32 = 0.25;
+        for i in 0..balls.len() {
+            let impact = ball_impacts[i];
+            let hit = impact.is_some();
+            if hit && !balls[i].touching_plank && balls[i].boing_cooldown <= 0.0 {
+                let speed = impact.unwrap();
+                if speed > 1.25 {
+                    play_sound_once(&boingee_sound);
+                    balls[i].boing_cooldown = BOING_COOLDOWN_SECS;
+                } else if speed > 0.9 {
+                    play_sound_once(&boing_sound);
+                    balls[i].boing_cooldown = BOING_COOLDOWN_SECS;
+                }
+            }
+            balls[i].touching_plank = hit;
+        }
+
         balls.retain(|b| b.pos.y < screen_height() + 100.0 && b.pos.x > -100.0 && b.pos.x < screen_width() + 100.0);
 
         // --- WOBBLE LOGIC ---
@@ -486,8 +216,8 @@ async fn main() {
                 let pos_b = plank.nodes[i].pos;
                 let pos_c = plank.nodes[i+1].pos;
 
-                let ab = pos_b.sub(pos_a);
-                let bc = pos_c.sub(pos_b);
+                let ab = pos_b.sub_val(pos_a);
+                let bc = pos_c.sub_val(pos_b);
                 
                 // 2D cross product Z component to find bend direction
                 let cross_z = ab.x * bc.y - ab.y * bc.x;
@@ -502,9 +232,9 @@ async fn main() {
                     last_sign = current_sign;
                 }
 
-                let a = ab.length();
-                let b = bc.length();
-                let c = pos_a.sub(pos_c).length();
+                let a = ab.length_val();
+                let b = bc.length_val();
+                let c = pos_a.sub_val(pos_c).length_val();
 
                 let s = (a + b + c) / 2.0;
                 let area_sq = s * (s - a) * (s - b) * (s - c);
@@ -574,15 +304,14 @@ mod tests {
     #[test]
     fn test_vec2_math() {
         let v1 = Vec2::new(3.0, 4.0);
-        assert_eq!(v1.length(), 5.0);
+        assert_eq!(v1.length_val(), 5.0);
         let v2 = Vec2::new(1.0, 1.0);
-        assert_eq!(v1.dot(v2), 7.0);
+        assert_eq!(v1.dot_val(v2), 7.0);
     }
 
     #[test]
     fn test_mass_scaling() {
         let b = Ball::new(Vec2::zero(), 10.0, 0.01, 0.5);
-        // mass = PI * 10^2 * 0.01 = 3.14159
-        assert!((b.mass - PI).abs() < 0.01);
+        assert!((b.mass - std::f32::consts::PI).abs() < 0.01);
     }
 }
