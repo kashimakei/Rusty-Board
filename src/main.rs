@@ -120,23 +120,35 @@ struct SoftBody {
 }
 
 impl SoftBody {
-    fn new_truss_plank(start: Vec2, length: f32, depth: f32, segments: usize, stiffness: f32) -> Self {
+    fn new_tree_branch(start: Vec2, length: f32, base_depth: f32, segments: usize, stiffness: f32) -> Self {
         let mut nodes = Vec::new();
         let mut constraints = Vec::new();
         let segment_len = length / segments as f32;
 
         for i in 0..=segments {
-            let pos = Vec2::new(start.x + i as f32 * segment_len, start.y);
+            let t = i as f32 / segments as f32;
+            let bend = (t * PI * 1.5).sin() * 30.0 + (t * PI * 4.0).sin() * 10.0 + (t * t * 40.0);
+            
+            let pos_top = Vec2::new(start.x + i as f32 * segment_len, start.y + bend);
             let pinned = i == 0 || i == 1; 
-            nodes.push(Node::new(pos, 3.0, pinned));
+            nodes.push(Node::new(pos_top, 3.0, pinned));
         }
+
         for i in 0..=segments {
-            let pos = Vec2::new(start.x + i as f32 * segment_len, start.y + depth);
-            let pinned = i == 0 || i == 1;
-            nodes.push(Node::new(pos, 3.0, pinned));
+            let t = i as f32 / segments as f32;
+            let current_depth = base_depth * (1.0 - 0.75 * t).max(0.1);
+            let bend = (t * PI * 1.5).sin() * 30.0 + (t * PI * 4.0).sin() * 10.0 + (t * t * 40.0);
+            
+            let pos_bottom = Vec2::new(start.x + i as f32 * segment_len, start.y + bend + current_depth);
+            let pinned = i == 0 || i == 1; 
+            nodes.push(Node::new(pos_bottom, 3.0, pinned));
         }
 
         let bottom_offset = segments + 1;
+
+        let get_dist = |nodes: &Vec<Node>, a: usize, b: usize| -> f32 {
+            nodes[a].pos.sub(nodes[b].pos).length()
+        };
 
         for i in 0..segments {
             let t1 = i;
@@ -144,15 +156,14 @@ impl SoftBody {
             let b1 = i + bottom_offset;
             let b2 = i + 1 + bottom_offset;
 
-            constraints.push(Constraint::new(t1, t2, segment_len, stiffness));
-            constraints.push(Constraint::new(b1, b2, segment_len, stiffness));
-            constraints.push(Constraint::new(t1, b1, depth, stiffness));
+            constraints.push(Constraint::new(t1, t2, get_dist(&nodes, t1, t2), stiffness));
+            constraints.push(Constraint::new(b1, b2, get_dist(&nodes, b1, b2), stiffness));
+            constraints.push(Constraint::new(t1, b1, get_dist(&nodes, t1, b1), stiffness));
             
-            let diag_len = (segment_len * segment_len + depth * depth).sqrt();
-            constraints.push(Constraint::new(t1, b2, diag_len, stiffness));
-            constraints.push(Constraint::new(b1, t2, diag_len, stiffness));
+            constraints.push(Constraint::new(t1, b2, get_dist(&nodes, t1, b2), stiffness));
+            constraints.push(Constraint::new(b1, t2, get_dist(&nodes, b1, t2), stiffness));
         }
-        constraints.push(Constraint::new(segments, segments + bottom_offset, depth, stiffness));
+        constraints.push(Constraint::new(segments, segments + bottom_offset, get_dist(&nodes, segments, segments + bottom_offset), stiffness));
 
         Self { nodes, constraints }
     }
@@ -309,7 +320,7 @@ fn resolve_ball_ball_collision(b1: &mut Ball, b2: &mut Ball) {
 
 // --- MAIN LOOP ---
 
-#[macroquad::main("Diving Board Sim (Final)")]
+#[macroquad::main("Tree Branch Sim (Final)")]
 async fn main() {
     request_new_screen_size(1280.0, 720.0);
     
@@ -319,7 +330,7 @@ async fn main() {
     let boingee_sound = load_sound("src/assets/Boingee.wav").await.unwrap_or_else(|_| panic!("Failed to load Boingee.wav"));
     let mut plank_length = DEFAULT_PLANK_LENGTH;
     let mut segments = (plank_length / PLANK_SEGMENT_DENSITY) as usize;
-    let mut plank = SoftBody::new_truss_plank(Vec2::new(100.0, 300.0), plank_length, 25.0, segments, PLANK_STIFFNESS);
+    let mut plank = SoftBody::new_tree_branch(Vec2::new(100.0, 300.0), plank_length, 45.0, segments, PLANK_STIFFNESS);
     let mut balls: Vec<Ball> = Vec::new();
     
     let mut gravity_val = GRAVITY;
@@ -359,7 +370,7 @@ async fn main() {
                 ui.slider(hash!(), "Board Length", 100.0..1500.0, &mut plank_length);
                 if (plank_length - old_len).abs() > 1.0 {
                     segments = (plank_length / PLANK_SEGMENT_DENSITY).max(2.0) as usize;
-                    plank = SoftBody::new_truss_plank(Vec2::new(100.0, 300.0), plank_length, 25.0, segments, stiffness_val);
+                    plank = SoftBody::new_tree_branch(Vec2::new(100.0, 300.0), plank_length, 45.0, segments, stiffness_val);
                 }
 
                 ui.slider(hash!(), "Gravity", 0.0..2000.0, &mut gravity_val);
@@ -386,7 +397,7 @@ async fn main() {
                     plank_length = DEFAULT_PLANK_LENGTH;
                     stiffness_val = PLANK_STIFFNESS;
                     segments = (plank_length / PLANK_SEGMENT_DENSITY) as usize;
-                    plank = SoftBody::new_truss_plank(Vec2::new(board_start, 300.0), plank_length, 25.0, segments, stiffness_val);
+                    plank = SoftBody::new_tree_branch(Vec2::new(board_start, 300.0), plank_length, 45.0, segments, stiffness_val);
                     balls_per_second = 1.0;
                     spawn_x_val = SPAWN_X;
                     ball_size_val = 15.0;
@@ -421,7 +432,7 @@ async fn main() {
         }
         if is_key_pressed(KeyCode::R) {
             segments = (plank_length / PLANK_SEGMENT_DENSITY) as usize;
-            plank = SoftBody::new_truss_plank(Vec2::new(100.0, 300.0), plank_length, 25.0, segments, stiffness_val);
+            plank = SoftBody::new_tree_branch(Vec2::new(100.0, 300.0), plank_length, 45.0, segments, stiffness_val);
             balls.clear();
         }
 
@@ -526,7 +537,7 @@ async fn main() {
         for c in &plank.constraints {
             let n1 = &plank.nodes[c.node_a];
             let n2 = &plank.nodes[c.node_b];
-            let color = if n1.pinned && n2.pinned { RED } else { Color::new(0.2, 0.4, 0.8, 0.5) };
+            let color = if n1.pinned && n2.pinned { RED } else { Color::new(0.3, 0.15, 0.05, 0.5) };
             draw_line(n1.pos.x, n1.pos.y, n2.pos.x, n2.pos.y, 1.5, color);
         }
 
@@ -535,8 +546,8 @@ async fn main() {
              let t2 = &plank.nodes[i+1];
              let b1 = &plank.nodes[i + plank.nodes.len()/2];
              let b2 = &plank.nodes[i + 1 + plank.nodes.len()/2];
-             draw_line(t1.pos.x, t1.pos.y, t2.pos.x, t2.pos.y, 4.0, SKYBLUE);
-             draw_line(b1.pos.x, b1.pos.y, b2.pos.x, b2.pos.y, 4.0, SKYBLUE);
+             draw_line(t1.pos.x, t1.pos.y, t2.pos.x, t2.pos.y, 4.0, Color::new(0.4, 0.2, 0.0, 1.0));
+             draw_line(b1.pos.x, b1.pos.y, b2.pos.x, b2.pos.y, 4.0, Color::new(0.4, 0.2, 0.0, 1.0));
         }
 
         for ball in &balls {
@@ -547,7 +558,7 @@ async fn main() {
             draw_circle_lines(ball.pos.x, ball.pos.y, ball.radius, 2.0, WHITE);
         }
 
-        draw_text("RUSTY BOARD: MULTI-BODY SYMPHONY", 20.0, 30.0, 30.0, WHITE);
+        draw_text("RUSTY BRANCH: MULTI-BODY SYMPHONY", 20.0, 30.0, 30.0, WHITE);
         draw_text(&format!("Bodies: {} | FPS: {}", balls.len() + plank.nodes.len(), get_fps()), 20.0, 60.0, 20.0, LIGHTGRAY);
 
         next_frame().await
